@@ -118,7 +118,7 @@ z_vel = Vel * sin(pitch);
 
 The missile is softly guided to a target position, e.g.:
 ```matlab
-target = [10500; 300];  % Target x, z in meters
+target = [10500; 0; 300];  % Target x, y, z in meters
 ```
 
 Soft constraint added to the cost, allowing flexibility:
