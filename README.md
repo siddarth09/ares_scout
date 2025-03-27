@@ -123,7 +123,7 @@ target = [10500; 300];  % Target x, z in meters
 
 Soft constraint added to the cost, allowing flexibility:
 ```matlab
-cost = cost + (final_pos - target)' * Q_terminal * (final_pos - target);
+% cost = cost + (final_pos - target)' * Q_terminal * (final_pos - target); % Duplicate instance removed
 ```
 
 ---
