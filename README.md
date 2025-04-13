@@ -117,7 +117,7 @@ end
 | Max Control Input                   | **0.11** | 0.13           | 0.30       | rad    |
 | Final Az Tracking Error             | 19.91  | **0.00**       | 14.97      | g      |
 | Final Pitch Rate Error (q)          | **0.04** | 0.16           | **0.00**   | rad/s  |
-| Total Control Effort ($\sum |u_k|$) | 48.94  | 10.34          | **6.06**   | rad    |
+| Total Control Effort (u)             | 48.94  | 10.34          | **6.06**   | rad    |
 
 ### Explanation:
 - **Time to Reach Target:** Indicates responsiveness. Lower is better.
