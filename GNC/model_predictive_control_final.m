@@ -18,7 +18,7 @@ sysd = c2d(plant,Ts);
 Ad = sysd.A; Bd = sysd.B; Cd = sysd.C; Dd = sysd.D;
 
 nx = size(Ad,1); nu = size(Bd,2); ny = size(Cd,1);
-Qy = diag([4, 1.5]); R = 1;
+Qy = diag([25, 10]); R = 1;
 
 %% CasADi symbolic model
 x = MX.sym('x',nx); u = MX.sym('u',nu);
@@ -33,13 +33,14 @@ X = MX.sym('X',nx,N+1);
 x0 = MX.sym('x0',nx);
 
 %% Reference tracking
-Az_step = [linspace(10, 15, floor(N/2)), 15*ones(1, ceil(N/2))]; % target normal acceleration (g)
+Az_ref = [linspace(10, 15, 10), 15*ones(1, n_steps-10)];
+
 q_ref = zeros(1, N);           % target pitch rate
 y_ref = [Az_step; q_ref];
 
 %% 3D estimation parameters
 Vel = 1021.08;  % m/s constant forward velocity
-n_steps = 120;
+n_steps = 80;
 x_sim = zeros(nx, n_steps+1); u_sim = zeros(nu, n_steps);
 x_sim(:,1) = x0_val;
 pitch_angle = zeros(1,n_steps+1);
@@ -48,6 +49,7 @@ z_pos = zeros(1,n_steps+1);
 
 x_pos(1)=1590;
 z_pos(1) = 13000;  % initial height
+
 
 %% MPC loop
 for t = 1:n_steps
@@ -70,42 +72,59 @@ for t = 1:n_steps
         x_next = f(x_k, u_k);
         g{end+1} = X(:,k+1) - x_next;
 
-        % Tracking cost
         y_k = C * x_k;
         y_ref_k = y_ref(:,k);
-        cost = cost+(y_k - y_ref_k)' * Qy * (y_k - y_ref_k) + u_k'*R*u_k;
+        cost = cost + (y_k - y_ref_k)' * Qy * (y_k - y_ref_k) + u_k' * R * u_k;
 
-        % Position integration
-        x_pos_pred(k+1) = x_pos_pred(k) + Vel*cos(pitch_pred(k+1))*Ts;
-        z_pos_pred(k+1) = z_pos_pred(k) + Vel*sin(pitch_pred(k+1))*Ts;
+        x_pos_pred(k+1) = x_pos_pred(k) + Vel * cos(pitch_pred(k+1)) * Ts;
+        z_pos_pred(k+1) = z_pos_pred(k) + Vel * sin(pitch_pred(k+1)) * Ts;
     end
 
-    % Terminal soft constraint to target position
+    % Terminal cost on final position
     target = [10500; 3000];
     final_pos = [x_pos_pred(end); z_pos_pred(end)];
-    Qterm = 0.05 * eye(2);
+    Qterm = 100 * eye(2);  % or even 50 * eye(2)
+
     cost = cost + (final_pos - target)' * Qterm * (final_pos - target);
 
-    % Solve
+    % Optimization variables and problem
     opt_vars = [reshape(X, nx*(N+1), 1); reshape(U, nu*N, 1)];
-    nlp = struct('x',opt_vars,'f',cost,'g',vertcat(g{:}),'p',x0);
-    solver = nlpsol('solver','ipopt',nlp,struct('ipopt',struct('print_level',0)));
+    nlp = struct('x', opt_vars, 'f', cost, 'g', vertcat(g{:}), 'p', x0);
+    solver = nlpsol('solver', 'ipopt', nlp, struct('ipopt', struct('print_level', 0)));
 
     % Initial guesses
-    U0 = zeros(nu,N); X0 = repmat(x_sim(:,t),1,N+1); w0 = [X0(:);U0(:)];
-    sol = solver('x0',w0,'p',x_sim(:,t),'lbg',0,'ubg',0);
+    U0 = zeros(nu,N); 
+    X0 = repmat(x_sim(:,t),1,N+1); 
+    w0 = [X0(:); U0(:)];
+
+    % Input bounds
+    u_min = -0.3; u_max = 0.2;
+    n_vars = length(w0);
+    lbx = -inf(n_vars,1); ubx = inf(n_vars,1);
+    u_start = nx*(N+1) + 1;
+    u_end = u_start + nu*N - 1;
+    lbx(u_start:u_end) = u_min;
+    ubx(u_start:u_end) = u_max;
+
+    % Solve NLP
+    sol = solver('x0', w0, ...
+                 'p', x_sim(:,t), ...
+                 'lbg', 0, 'ubg', 0, ...
+                 'lbx', lbx, 'ubx', ubx);
+
+    % Extract optimal control
     w_opt = full(sol.x);
-    U_opt = reshape(w_opt(nx*(N+1)+1:end),nu,N);
+    U_opt = reshape(w_opt(nx*(N+1)+1:end), nu, N);
+    u0 = U_opt(:,1);
+    u_sim(:,t) = u0;
 
-    % Apply control and update states
-    u0 = U_opt(:,1); u_sim(:,t) = u0;
+    % Update states
     x_sim(:,t+1) = Ad * x_sim(:,t) + Bd * u0;
-
-    % Update pitch and trajectory
     pitch_angle(t+1) = pitch_angle(t) + x_sim(2,t)*Ts;
-    x_pos(t+1) = x_pos(t) + Vel*cos(pitch_angle(t+1))*Ts;
-    z_pos(t+1) = z_pos(t) + Vel*sin(pitch_angle(t+1))*Ts;
+    x_pos(t+1) = x_pos(t) + Vel * cos(pitch_angle(t+1)) * Ts;
+    z_pos(t+1) = z_pos(t) + Vel * sin(pitch_angle(t+1)) * Ts;
 end
+
 
 %% Plot results
 time = 0:Ts:n_steps*Ts;
@@ -142,6 +161,11 @@ z_pos = z_pos(:)';
 pitch_angle = pitch_angle(:)';
 
 %% Missile Geometry
+
+videoObj = VideoWriter('missile_simulation.mp4', 'MPEG-4');
+videoObj.FrameRate = 5;
+open(videoObj);
+
 missile_length = 0.1; missile_radius = 0.02;
 [cone_x, cone_y, cone_z] = cylinder([0 missile_radius], 20);
 cone_z = missile_length * cone_z;
@@ -261,7 +285,10 @@ for k = 2:length(x_pos)
     set(h_trail2, 'XData', x_pos(1:k)/1000, 'YData', y_pos(1:k)/1000, 'ZData', z_pos(1:k)/1000);
 
     drawnow;
-    pause(0.03);
+    frame = getframe(fig);  % capture the current frame of your animation figure
+    writeVideo(videoObj, frame);
+
+    pause(0.09);
 end
 
 % Final explosion in cinematic view
@@ -279,8 +306,10 @@ scatter3(Xexp, Yexp, Zexp, 40, [1 0.3 0], 'filled');
 title(' Impact Explosion!');
 pause(2.0);
 
+frame = getframe(fig);  % capture the current frame of your animation figure
+writeVideo(videoObj, frame);
 
-
+close(videoObj);
 
 
 % -------------------- Performance Analysis --------------------

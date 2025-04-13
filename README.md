@@ -1,168 +1,144 @@
+# Missile Autopilot Controller Comparison
 
+This repository presents a comprehensive comparison of three control strategies used in missile autopilot design:
 
-# **Missile Guidance using Model Predictive Control (MPC)**
+- **State Feedback with Integral Action (SFI)**
+- **Linear Quadratic Regulator (LQR + Integral Augmentation)**
+- **Model Predictive Control (MPC)**
 
-## **Overview**
-
-This project implements a **Model Predictive Control (MPC)** scheme to guide a missile from an initial altitude towards a specified 3D target location, while accounting for pitch dynamics, acceleration tracking, and trajectory prediction. The control is realized using **CasADi** for nonlinear optimization and **MATLAB** for simulation and visualization.
-
-https://github.com/user-attachments/assets/56963eb2-63f4-478c-9689-39140d228990
-
-
----
-
-## **1. Objective**
-
-Design a guidance controller that:
-- Accurately tracks desired missile dynamics (normal acceleration and pitch rate),
-- Predicts and controls future behavior,
-- Guides the missile to a 3D target (in x-z or x-y-z space),
-- Animates the missile's trajectory and body.
+Each controller is implemented on a realistic linearized missile model and evaluated for guidance performance, control efficiency, and trajectory tracking.
 
 ---
 
-## **2. Missile Dynamics Model**
-
-The longitudinal dynamics of the missile are modeled as a discrete-time state-space system:
-
-**States:**
-- `x = [alpha; q]` (angle of attack and pitch rate)
-
-**Input:**
-- `u` = fin deflection
-
-**Output:**
-- `y = [az; q]` (normal acceleration and pitch rate)
-
-### State-space matrices (continuous):
-```matlab
-A = [-1.064 1.000; 290.26 0.00];
-B = [-0.25; -331.40];
-C = [-123.34 0.00; 0.00 1.00];
-D = [0;0];
-```
-
-Discretization using sampling time `Ts = 0.1`:
-```matlab
-sysd = c2d(ss(A,B,C,D), Ts);
-```
+## 1. Introduction
+Missile Guidance, Navigation, and Control (GNC) systems are crucial for accurate targeting and stability. In modern applications, we must evaluate not only tracking performance but also robustness, energy efficiency, and constraint handling. This project implements and visualizes three prominent control strategies in MATLAB, assessing each for real-time missile trajectory execution.
 
 ---
 
-## **3. Model Predictive Control (MPC)**
+## 2. State Feedback with Integral Action (SFI)
 
-MPC is a receding-horizon control strategy that:
-1. Predicts system behavior over a future window (`N` steps),
-2. Solves an optimization problem to minimize a cost,
-3. Applies only the first control input,
-4. Repeats this process at each step.
-
-### Cost Function Components:
-- Output tracking: `(y_k - y_ref_k)' * Qy * (y_k - y_ref_k)`
-- Control effort: `u_k' * R * u_k`
-- Terminal target error (soft constraint): `(final_pos - target)' * Q_terminal * (final_pos - target)`
-
-### CasADi MPC Implementation:
-
-**Dynamics Function:**
+### a) Controller Algorithm (Pseudocode Outline)
 ```matlab
-x_next = Ad*x + Bd*u;
-f = Function('f',{x,u},{x_next});
+Initialize state x = [alpha; q];
+Initialize integral error int_error = 0;
+Set initial position, altitude, and pitch angle;
+
+for each time step:
+    Calculate Line-of-Sight (LOS) angle;
+    Compute LOS error = LOS_angle - current_pitch;
+    Compute desired acceleration Az_ref = -K_guidance * LOS_error;
+    Add launch boost (if in early phase);
+    Measure actual Az = C * x;
+    Update integral error: int_error += (Az_ref - Az) * dt;
+    Compute control input: u = -K * x - Ki * int_error;
+    Update state using Euler integration;
+    Update position using velocity projection;
+end
 ```
 
-**Optimization Variables:**
-```matlab
-U = MX.sym('U', nu, N);     % Control inputs
-X = MX.sym('X', nx, N+1);   % States
-```
+### b) Figures
+- **State Trajectories and Control Input:**
+ 
+ ![Image](https://github.com/user-attachments/assets/d4e84cc1-dc86-4635-83a4-073b5c5acb0e)
+  
 
-**Constraints:**
-```matlab
-g{end+1} = X(:,1) - x0;                   % Initial condition
-g{end+1} = X(:,k+1) - f(X(:,k), U(:,k));  % System dynamics
-```
+- **Tracking Error ($A_z$, $q$):**
+  
+  ![Image](https://github.com/user-attachments/assets/537a778d-df36-4d6e-bb32-9b5c75a09e43)
 
-**Tracking Cost:**
-```matlab
-cost = cost + (y_k - y_ref_k)' * Qy * (y_k - y_ref_k) + u_k' * R * u_k;
-```
-
-**Terminal Soft Constraint:**
-```matlab
-cost = cost + (final_pos - target)' * Q_terminal * (final_pos - target);
-```
+> SFI maintains stable pitch rate and angle of attack with minimal control effort, though it struggles to tightly track the $A_z$ reference.
 
 ---
 
-## **4. Trajectory Estimation**
+## 3. Linear Quadratic Regulator (LQR + Integral)
 
-Using estimated pitch and constant velocity, future positions are calculated:
-
+### a) Controller Algorithm (Pseudocode Outline)
 ```matlab
-pitch_angle(t+1) = pitch_angle(t) + q * Ts;
+Discretize missile system to obtain Ad, Bd, Cd;
+Augment with integral state to track Az error;
+Solve DARE using dlqr to get gain K_aug = [K, Ki];
 
-x_pos(t+1) = x_pos(t) + Vel * cos(pitch_angle(t+1)) * Ts;
-z_pos(t+1) = z_pos(t) + Vel * sin(pitch_angle(t+1)) * Ts;
+for each time step:
+    Compute Az error = Az_ref - Az;
+    Update integral error: int_e += error * Ts;
+    Form augmented state: x_aug = [x; int_e];
+    Compute control input: u = -K_aug * x_aug;
+    Propagate next state and update trajectory;
+end
 ```
 
-**For 3D extension (with yaw):**
-```matlab
-x_vel = Vel * cos(pitch) * cos(yaw);
-y_vel = Vel * cos(pitch) * sin(yaw);
-z_vel = Vel * sin(pitch);
-```
+### b) Figures
+- **State Trajectories and Control Input:**
+  
+ ![Image](https://github.com/user-attachments/assets/9ca938bc-c3cc-4f71-ba94-7a7ee64b7fea)
+- **Tracking Error ($A_z$, $q$):**
+  
+  ![Image](https://github.com/user-attachments/assets/a0a3f1a0-1f59-450e-9593-4b3ca63296db)
+  
+> LQR with integral action shows smooth convergence and near-perfect tracking of both acceleration and pitch rate.
 
 ---
 
-## **5. Target & Soft Constraints**
+## 4. Model Predictive Control (MPC)
 
-The missile is softly guided to a target position, e.g.:
+### a) Controller Algorithm (Pseudocode Outline)
 ```matlab
-target = [10500; 0; 300];  % Target x, y, z in meters
+Discretize model: Ad, Bd, Cd;
+Define prediction horizon N and weights Qy, R, Qterm;
+Symbolically define future states X and inputs U;
+for each time step:
+    Construct cost function (tracking + effort + terminal);
+    Enforce dynamics as equality constraints;
+    Add input bounds (e.g. u in [-0.3, 0.2]);
+    Solve NLP using CasADi + IPOPT;
+    Apply first optimal input u = U(1);
+    Propagate state forward and update trajectory;
+end
 ```
 
-Soft constraint added to the cost, allowing flexibility:
-```matlab
-% cost = cost + (final_pos - target)' * Q_terminal * (final_pos - target); % Duplicate instance removed
-```
+### b) Figures
+- **State Trajectories and Control Input:**
+  
+  ![Image](https://github.com/user-attachments/assets/17eae54d-4396-4baf-b54b-012c7043ef1a)
+- **Tracking Error ($A_z$, $q$):**
+  
+  ![Image](https://github.com/user-attachments/assets/831126bf-88ff-4050-acc2-c899891a624f)
+
+> MPC offers aggressive and efficient control with fast convergence. It slightly underperforms in final Az tracking due to soft constraints.
 
 ---
 
-## **6. Visualization and Animation**
+## 5. Performance Evaluation
 
-### Static 3D Plot:
-```matlab
-plot3(x_pos/1000, y_pos/1000, z_pos/1000);  % In kilometers
-```
+| Metric                              | SFI    | LQR + Integral | MPC (Ours) | Unit   |
+|-------------------------------------|--------|----------------|------------|--------|
+| Time to Reach Target Altitude       | 13.80  | 10.00          | **8.00**   | s      |
+| Avg Control Input Magnitude         | **0.04** | 0.10           | 0.08       | rad    |
+| Max Control Input                   | **0.11** | 0.13           | 0.30       | rad    |
+| Final Az Tracking Error             | 19.91  | **0.00**       | 14.97      | g      |
+| Final Pitch Rate Error (q)          | **0.04** | 0.16           | **0.00**   | rad/s  |
+| Total Control Effort (u)             | 48.94  | 10.34          | **6.06**   | rad    |
 
-### Animated Missile Body (Red Cone):
-```matlab
-R = [cos(theta) 0 sin(theta); 0 1 0; -sin(theta) 0 cos(theta)];
-```
-This rotation matrix aligns the cone with the missile’s current pitch.
-
-Animation is updated inside a loop using:
-```matlab
-set(missile_surf, 'XData', Xr, 'YData', Yr, 'ZData', Zr);
-```
-
----
-
-## **7. Why Use MPC for Missile Guidance?**
-
-- ✅ **Predictive**: Plans ahead based on future behavior.
-- ✅ **Constraint-aware**: Can limit acceleration, pitch, deflection, etc.
-- ✅ **Optimal**: Finds the best control inputs at each step.
-- ✅ **Multi-objective**: Track a dynamic reference AND reach a goal.
-- ✅ **Flexible**: Extendable to full 6DOF, wind effects, obstacles.
+### Explanation:
+- **Time to Reach Target:** Indicates responsiveness. Lower is better.
+- **Control Input Metrics:** Show actuator workload.
+- **Tracking Errors:** Assess steady-state and dynamic accuracy.
+- **Total Control Effort:** Measures energy consumed in maneuvering.
 
 ---
 
-## **8. Future Extensions**
+## 6. Demo Video
 
-- Add full lateral motion (turning dynamics)
-- Obstacle avoidance with constraint zones
-- Nonlinear missile dynamics modeling
-- Time-optimal or energy-optimal descent
-- Real-time implementation on embedded hardware
+
+https://github.com/user-attachments/assets/03c58922-3aa7-4e7f-9103-baea0c317722
+
+---
+
+## Authors
+- [Siddarth Dayasagar](https://github.com/siddarth09)
+- [Sarthak Talwadkar](https://github.com/sarthak-talwadkar)
+- [Ket Bhikadiya]( https://github.com/bhikadiya-k)
+- [Chaitanya Salve](https://github.com/salve-c)
+
+Feel free to fork, star, or contribute to this repository.
 

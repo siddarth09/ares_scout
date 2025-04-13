@@ -1,0 +1,351 @@
+addpath('C:\Users\Siddarth\Documents\MATLAB')
+import casadi.*
+
+%% Missile Longitudinal Dynamics
+A = [-1.064 1.000; 290.26 0.00];
+B = [-0.25; -331.40];
+C = [-123.34 0.00; 0.00 1.00];
+D = [0;0];
+plant = ss(A,B,C,D);
+
+% Check system properties
+if rank(ctrb(A,B)) == size(A,1), disp("System is controllable"), end
+if rank(obsv(A,C)) == size(A,1), disp("System is observable"), end
+
+%% Discretization
+Ts = 0.1;
+sysd = c2d(plant,Ts);
+Ad = sysd.A; Bd = sysd.B; Cd = sysd.C; Dd = sysd.D;
+
+nx = size(Ad,1); nu = size(Bd,2); ny = size(Cd,1);
+Qy = diag([10, 5]); R = 10;
+
+%% CasADi symbolic model
+x = MX.sym('x',nx); u = MX.sym('u',nu);
+x_next = Ad*x + Bd*u;
+f = Function('f',{x,u},{x_next});
+
+%% MPC setup
+N = 15;
+x0_val = [0; 0];
+U = MX.sym('U',nu,N);
+X = MX.sym('X',nx,N+1);
+x0 = MX.sym('x0',nx);
+
+%% Reference tracking
+Az_step = [linspace(10, 15, floor(N/2)), 15*ones(1, ceil(N/2))]; % target normal acceleration (g)
+q_ref = zeros(1, N);           % target pitch rate
+y_ref = [Az_step; q_ref];
+
+%% 3D estimation parameters
+Vel = 1021.08;  % m/s constant forward velocity
+n_steps = 120;
+x_sim = zeros(nx, n_steps+1); u_sim = zeros(nu, n_steps);
+x_sim(:,1) = x0_val;
+pitch_angle = zeros(1,n_steps+1);
+x_pos = zeros(1,n_steps+1);
+z_pos = zeros(1,n_steps+1);
+
+x_pos(1)=1590;
+z_pos(1) = 13000;  % initial height
+
+%% MPC loop
+for t = 1:n_steps
+    cost = 0; g = {};
+    g{end+1} = X(:,1) - x0;
+
+    % Predict pitch angle symbolically
+    pitch_pred = MX.zeros(1,N+1);
+    pitch_pred(1) = pitch_angle(t);     
+
+    % Predict 3D trajectory symbolically
+    x_pos_pred = MX.zeros(1,N+1);
+    z_pos_pred = MX.zeros(1,N+1);
+    x_pos_pred(1) = x_pos(t);
+    z_pos_pred(1) = z_pos(t);
+
+    for k = 1:N
+        pitch_pred(k+1) = pitch_pred(k) + X(2,k)*Ts;
+        x_k = X(:,k); u_k = U(:,k);
+        x_next = f(x_k, u_k);
+        g{end+1} = X(:,k+1) - x_next;
+
+        % Tracking cost
+        y_k = C * x_k;
+        y_ref_k = y_ref(:,k);
+        cost = cost+(y_k - y_ref_k)' * Qy * (y_k - y_ref_k) + u_k'*R*u_k;
+
+        % Position integration
+        x_pos_pred(k+1) = x_pos_pred(k) + Vel*cos(pitch_pred(k+1))*Ts;
+        z_pos_pred(k+1) = z_pos_pred(k) + Vel*sin(pitch_pred(k+1))*Ts;
+    end
+
+    % Terminal soft constraint to target position
+    target = [10500; 3000];
+    final_pos = [x_pos_pred(end); z_pos_pred(end)];
+    Qterm = 1.0 * eye(2);
+    u_min = -0.2;  % radians
+    u_max = 0.2;
+    cost = cost + (final_pos - target)' * Qterm * (final_pos - target);
+
+    % Solve
+    opt_vars = [reshape(X, nx*(N+1), 1); reshape(U, nu*N, 1)];
+    nlp = struct('x',opt_vars,'f',cost,'g',vertcat(g{:}),'p',x0);
+    solver = nlpsol('solver','ipopt',nlp,struct('ipopt',struct('print_level',0)));
+
+    % Initial guesses
+    U0 = zeros(nu,N); X0 = repmat(x_sim(:,t),1,N+1); w0 = [X0(:);U0(:)];
+    sol = solver('x0',w0,'p',x_sim(:,t),'lbg',0,'ubg',0);
+    w_opt = full(sol.x);
+    U_opt = reshape(w_opt(nx*(N+1)+1:end),nu,N);
+
+    % Apply control and update states
+    u0 = U_opt(:,1); u_sim(:,t) = u0;
+    x_sim(:,t+1) = Ad * x_sim(:,t) + Bd * u0;
+
+    % Update pitch and trajectory
+    pitch_angle(t+1) = pitch_angle(t) + x_sim(2,t)*Ts;
+    x_pos(t+1) = x_pos(t) + Vel*cos(pitch_angle(t+1))*Ts;
+    z_pos(t+1) = z_pos(t) + Vel*sin(pitch_angle(t+1))*Ts;
+end
+
+%% Plot results
+time = 0:Ts:n_steps*Ts;
+figure;
+plot(0:Ts:Ts*n_steps, z_pos, 'LineWidth', 1.5);
+title('Missile Altitude vs Time'); ylabel('Altitude (m)'); xlabel('Time (s)'); grid on;
+
+figure;
+subplot(2,1,1);
+plot(time, x_sim(1,:), 'r', 'LineWidth', 1.5); hold on;
+plot(time, x_sim(2,:), 'b', 'LineWidth', 1.5);
+legend('Alpha', 'q'); title('State Trajectories'); grid on;
+
+subplot(2,1,2);
+stairs(time(1:end-1), u_sim, 'k', 'LineWidth', 1.5);
+title('Control Input'); xlabel('Time (s)'); ylabel('Fin Deflection'); grid on;
+
+y_pos = zeros(size(x_pos));  % 2D flat trajectory
+% Update pitch and trajectory
+pitch_angle(t+1) = pitch_angle(t) + x_sim(2,t)*Ts;
+x_pos(t+1) = x_pos(t) + Vel*cos(pitch_angle(t+1))*Ts;
+z_pos(t+1) = z_pos(t) + Vel*sin(pitch_angle(t+1))*Ts;
+
+
+
+
+%% TOP GUN Missile Sim: Director's Cut Edition
+% Cinematic + Clean View | Fullscreen | Linked Cameras | HUD Overlay
+
+t = 0:Ts:n_steps*Ts;
+x_pos = x_pos(:)';
+y_pos = y_pos(:)';
+z_pos = z_pos(:)';
+pitch_angle = pitch_angle(:)';
+
+%% Missile Geometry
+
+videoObj = VideoWriter('missile_simulation.mp4', 'MPEG-4');
+videoObj.FrameRate = 5;
+open(videoObj);
+
+missile_length = 0.1; missile_radius = 0.02;
+[cone_x, cone_y, cone_z] = cylinder([0 missile_radius], 20);
+cone_z = missile_length * cone_z;
+
+wing_length = 0.05; wing_width = 0.005;
+wing_shape = [-wing_width, wing_width, wing_width, -wing_width, -wing_width;
+              0, 0, wing_length, wing_length, 0];
+
+% Create Figure with Two Subplots
+fig = figure('Name','Top Gun Sim Split View', 'Units','normalized', 'OuterPosition',[0 0 1 1]);
+
+% Subplot 1: Cinematic Missile View
+ax1 = subplot(1,2,1);
+hold(ax1, 'on'); axis(ax1, 'equal'); grid(ax1, 'on');
+xlabel(ax1, 'x (km)'); ylabel(ax1, 'y (km)'); zlabel(ax1, 'z (km)');
+title(ax1, 'Cinematic Missile View'); view(ax1, 3);
+
+% Subplot 2: Clean Trajectory View
+ax2 = subplot(1,2,2);
+hold(ax2, 'on'); axis(ax2, 'equal'); grid(ax2, 'on');
+xlabel(ax2, 'x (km)'); ylabel(ax2, 'y (km)'); zlabel(ax2, 'z (km)');
+title(ax2, 'Clean Trajectory View'); view(ax2, 3);
+
+% Cinematic View Elements (left)
+axes(ax1);
+h_trail1 = plot3(ax1, x_pos(1)/1000, y_pos(1)/1000, z_pos(1)/1000, 'b', 'LineWidth', 1.5);
+plot3(ax1, x_pos(1)/1000, y_pos(1)/1000, z_pos(1)/1000, 'go', 'MarkerSize', 8);
+plot3(ax1, x_pos(end)/1000, y_pos(end)/1000, z_pos(end)/1000, 'ro', 'MarkerSize', 8);
+missile_surf1 = surf(ax1, nan(size(cone_x)), nan(size(cone_y)), nan(size(cone_z)), 'FaceColor','r','EdgeColor','none');
+wing_patches = gobjects(4,1);
+for i = 1:4
+    wing_patches(i) = fill3(ax1, nan, nan, nan, 'k');
+end
+flame_patch = fill3(ax1, nan, nan, nan, 'r', 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+smoke = scatter3(ax1, nan, nan, nan, 10, [0.3 0.3 0.3], 'filled', 'MarkerFaceAlpha', 0.3);
+smokeX = []; smokeY = []; smokeZ = [];
+
+% Translucent HUD Panel (Top Left)
+hud_panel = uipanel('Parent', fig, 'Units', 'normalized', 'Position', [0.01 0.75 0.22 0.22], ...
+                    'BackgroundColor', [0 0 0 0.4], 'BorderType', 'none');
+hud_alt   = uicontrol('Parent', hud_panel, 'Style', 'text', 'Units','normalized', ...
+                      'Position', [0.05 0.7 0.9 0.2], 'String', '', 'ForegroundColor', 'w', ...
+                      'BackgroundColor', 'none', 'FontSize', 12, 'HorizontalAlignment','left');
+hud_vel   = uicontrol('Parent', hud_panel, 'Style', 'text', 'Units','normalized', ...
+                      'Position', [0.05 0.45 0.9 0.2], 'String', '', 'ForegroundColor', 'w', ...
+                      'BackgroundColor', 'none', 'FontSize', 12, 'HorizontalAlignment','left');
+hud_pitch = uicontrol('Parent', hud_panel, 'Style', 'text', 'Units','normalized', ...
+                      'Position', [0.05 0.2 0.9 0.2], 'String', '', 'ForegroundColor', 'w', ...
+                      'BackgroundColor', 'none', 'FontSize', 12, 'HorizontalAlignment','left');
+
+% Clean View Elements (right)
+axes(ax2);
+h_trail2 = plot3(ax2, x_pos(1)/1000, y_pos(1)/1000, z_pos(1)/1000, 'b', 'LineWidth', 1.5);
+plot3(ax2, x_pos(1)/1000, y_pos(1)/1000, z_pos(1)/1000, 'go', 'MarkerSize', 8);
+plot3(ax2, x_pos(end)/1000, y_pos(end)/1000, z_pos(end)/1000, 'ro', 'MarkerSize', 8);
+missile_surf2 = surf(ax2, nan(size(cone_x)), nan(size(cone_y)), nan(size(cone_z)), 'FaceColor','r','EdgeColor','none');
+
+% Animation Loop
+for k = 2:length(x_pos)
+    center = [x_pos(k); y_pos(k); z_pos(k)] / 1000;
+    theta = pitch_angle(k);
+
+    R = [cos(theta) 0 sin(theta); 0 1 0; -sin(theta) 0 cos(theta)];
+    rotated = R * [cone_x(:)'; cone_y(:)'; cone_z(:)'];
+    Xr = reshape(rotated(1,:) + center(1), size(cone_x));
+    Yr = reshape(rotated(2,:) + center(2), size(cone_y));
+    Zr = reshape(rotated(3,:) + center(3), size(cone_z));
+
+    % Cinematic view update
+    set(missile_surf1, 'XData', Xr, 'YData', Yr, 'ZData', Zr);
+    set(h_trail1, 'XData', x_pos(1:k)/1000, 'YData', y_pos(1:k)/1000, 'ZData', z_pos(1:k)/1000);
+    campos(ax1, center' + [-2.8, -1.4, 0.6]);
+    camtarget(ax1, center'); camup(ax1, [0, 0, 1]); camva(ax1, 12);
+
+    % Smoke trail
+    smoke_center = center - R * [0; 0; 0.03];
+    smokeX(end+1) = smoke_center(1) + 0.002*randn();
+    smokeY(end+1) = smoke_center(2) + 0.002*randn();
+    smokeZ(end+1) = smoke_center(3) + 0.002*randn();
+    set(smoke, 'XData', smokeX, 'YData', smokeY, 'ZData', smokeZ);
+
+    % Flame
+    flame_len = 0.05 + 0.02*rand();
+    flame_back = center - R * [0; 0; flame_len];
+    flame_shape = [center, ...
+                   flame_back + R*[0.01; 0.01; 0], ...
+                   flame_back + R*[-0.01; 0.01; 0], ...
+                   flame_back + R*[-0.01; -0.01; 0], ...
+                   flame_back + R*[0.01; -0.01; 0]];
+    set(flame_patch, 'XData', flame_shape(1,:), 'YData', flame_shape(2,:), 'ZData', flame_shape(3,:));
+
+    % Wings
+    for i = 1:4
+        rot_angle = (i-1) * pi/2;
+        wing_rot = [cos(rot_angle), -sin(rot_angle); sin(rot_angle), cos(rot_angle)];
+        wing_pts2D = wing_rot * wing_shape;
+        wing_pts3D = R * [wing_pts2D; 0.02*ones(1,5)] + center;
+        set(wing_patches(i), 'XData', wing_pts3D(1,:), 'YData', wing_pts3D(2,:), 'ZData', wing_pts3D(3,:));
+    end
+
+    % HUD Update
+    if k > 1
+        Vx = (x_pos(k) - x_pos(k-1)) / (t(k) - t(k-1));
+        Vz = (z_pos(k) - z_pos(k-1)) / (t(k) - t(k-1));
+        vel = sqrt(Vx^2 + Vz^2) / 1000;
+    else
+        vel = 0;
+    end
+    alt = z_pos(k) ;
+    pitch_deg = rad2deg(pitch_angle(k));
+    set(hud_alt,  'String', sprintf('ALTITUDE: %.2f km', alt));
+    set(hud_vel,  'String', sprintf('VELOCITY: %.2f km/s', vel));
+    set(hud_pitch,'String', sprintf('PITCH: %.1f\circ', pitch_deg));
+
+    % Clean view update
+    set(missile_surf2, 'XData', Xr, 'YData', Yr, 'ZData', Zr);
+    set(h_trail2, 'XData', x_pos(1:k)/1000, 'YData', y_pos(1:k)/1000, 'ZData', z_pos(1:k)/1000);
+
+    drawnow;
+    frame = getframe(fig);  % capture the current frame of your animation figure
+    writeVideo(videoObj, frame);
+
+    pause(0.09);
+end
+
+% Final explosion in cinematic view
+axes(ax1);
+explosion_center = [x_pos(end); y_pos(end); z_pos(end)] / 1000;
+num_particles = 150;
+explosion_radius = 0.1;
+theta = rand(1,num_particles)*2*pi;
+phi = acos(2*rand(1,num_particles)-1);
+r = explosion_radius * rand(1,num_particles);
+Xexp = explosion_center(1) + r .* sin(phi).*cos(theta);
+Yexp = explosion_center(2) + r .* sin(phi).*sin(theta);
+Zexp = explosion_center(3) + r .* cos(phi);
+scatter3(Xexp, Yexp, Zexp, 40, [1 0.3 0], 'filled');
+title(' Impact Explosion!');
+pause(2.0);
+
+frame = getframe(fig);  % capture the current frame of your animation figure
+writeVideo(videoObj, frame);
+
+close(videoObj);
+
+
+% -------------------- Performance Analysis --------------------
+
+%% 1. Time to Reach Target
+altitude_error = abs(z_pos - 3000);  % target altitude in meters
+[~, reach_idx] = min(altitude_error);  % closest step to 3000 m
+time_to_target = t(reach_idx);
+fprintf('Time to Reach Target Altitude: %.2f seconds\n', time_to_target);
+
+%% 2. Final Tracking Errors
+final_state = x_sim(:, end);
+final_output = C * final_state;
+final_error = y_ref(:, end) - final_output;
+fprintf('Final Tracking Errors:\n');
+fprintf('  Az Error: %.2f\n', final_error(1));
+fprintf('   q Error: %.2f\n', final_error(2));
+
+%% 3. Total Control Effort
+total_control_effort = sum(abs(u_sim(:)));
+fprintf('Total Control Effort: %.2f\n', total_control_effort);
+
+%% 4. Average Control Input Magnitude
+average_control = mean(abs(u_sim(:)));
+fprintf('Average Control Input Magnitude: %.2f\n', average_control);
+
+%% 5. Max Control Input
+max_control = max(abs(u_sim(:)));
+fprintf('Maximum Control Input: %.2f\n', max_control);
+
+%% 6. Plot Control Input Histogram
+figure;
+histogram(u_sim(:), 20);
+title('Control Input Distribution');
+xlabel('Fin Deflection'); ylabel('Frequency'); grid on;
+
+%% 7. Plot Pitch and Acceleration Tracking Error Over Time
+tracking_error = zeros(2, n_steps);
+for i = 1:n_steps
+    y_i = C * x_sim(:, i);
+    if i <= size(y_ref, 2)
+        ref_i = y_ref(:, i);
+    else
+        ref_i = y_ref(:, end);  % hold last reference
+    end
+    tracking_error(:, i) = y_i - ref_i;
+end
+
+figure;
+subplot(2,1,1);
+plot(t(1:end-1), tracking_error(1,:), 'r', 'LineWidth', 1.5);
+title('Tracking Error: Az (Normal Acceleration)'); ylabel('Error'); grid on;
+
+subplot(2,1,2);
+plot(t(1:end-1), tracking_error(2,:), 'b', 'LineWidth', 1.5);
+title('Tracking Error: q (Pitch Rate)'); xlabel('Time (s)'); ylabel('Error'); grid on;

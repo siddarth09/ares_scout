@@ -1,0 +1,158 @@
+%% SFI CONTROLLER (State Feedback with Integral Action) Missile Autopilot
+
+% Missile Dynamics (longitudinal)
+A = [-1.064 1.000; 290.26 0.00];
+B = [-0.25; -331.40];
+C = [-123.34 0.00];  % Output: Azm
+
+% Augmented system for integral control
+A_aug = [A, zeros(2,1); -C, 0];
+B_aug = [B; 0];
+
+% Pole placement
+poles = [-4, -6, -8];
+K_aug = place(A_aug, B_aug, poles);
+K = K_aug(1:2);
+Ki = K_aug(3);
+
+% Simulation parameters
+dt = 0.01;
+T = 13.8;
+t = 0:dt:T;
+n = length(t);
+
+% Initial conditions
+x = zeros(2, n);
+int_error = 0;
+Azm = zeros(1, n);
+u = zeros(1, n);
+theta = zeros(1, n);
+x_pos = zeros(1, n);
+z_pos = zeros(1, n);
+x_pos(1) = 1590;
+z_pos(1) = 13000;
+theta(1) = 0;
+
+% Target-based LOS Guidance
+X_target = 10500;
+Z_target = 3000;
+K_guidance = 10;
+
+for i = 1:n-1
+    dx = X_target - x_pos(i);
+    dz = Z_target - z_pos(i);
+    LOS_angle = atan2(dz, dx);
+    LOS_error = max(min(LOS_angle - theta(i), deg2rad(20)), deg2rad(-20));
+
+    distance = sqrt(dx^2 + dz^2);
+    K_guided = 3 * (distance < 1000) + K_guidance * (distance >= 1000);
+
+    Az_ref = -K_guided * LOS_error;
+    if t(i) < 2
+        Az_ref = Az_ref + 11.3;
+    end
+
+    Az = C * x(:, i);
+    error = Az_ref - Az;
+    int_error = int_error + dt * error;
+    u(i) = -K * x(:, i) - Ki * int_error;
+
+    dx_vec = A * x(:, i) + B * u(i);
+    x(:, i+1) = x(:, i) + dt * dx_vec;
+    Azm(i+1) = Az;
+
+    theta(i+1) = theta(i) + x(2,i)*dt;
+    vx = 900 * cos(theta(i));
+    vz = 900 * sin(theta(i));
+    x_pos(i+1) = x_pos(i) + vx * dt;
+    z_pos(i+1) = z_pos(i) + vz * dt;
+end
+
+% Final state vectors
+u_sim = u(1:n);
+x_sim = x(:,1:n);
+time = t(1:n);
+z_pos = z_pos(1:n);
+
+%% Altitude, States, and Control Input Plots
+figure;
+plot(time, z_pos, 'LineWidth', 1.5);
+title('Missile Altitude vs Time'); 
+ylabel('Altitude (m)'); 
+xlabel('Time (s)'); 
+grid on;
+
+figure;
+subplot(2,1,1);
+plot(time, x_sim(1,:), 'r', 'LineWidth', 1.5); hold on;
+plot(time, x_sim(2,:), 'b', 'LineWidth', 1.5);
+legend('Alpha', 'q'); 
+title('State Trajectories'); 
+ylabel('State Values'); 
+grid on;
+
+subplot(2,1,2);
+stairs(time, u_sim, 'k', 'LineWidth', 1.5);
+title('Control Input'); 
+xlabel('Time (s)'); 
+ylabel('Fin Deflection'); 
+grid on;
+
+%% Cone-Shaped Missile Animation
+missile_length = 0.1; missile_radius = 0.02;
+[cone_x, cone_y, cone_z] = cylinder([0 missile_radius], 20);
+cone_z = missile_length * cone_z;
+
+figure; hold on; axis equal; grid on;
+xlabel('x (km)'); ylabel('y (km)'); zlabel('z (km)');
+title('Missile Trajectory Animation (SFI)'); view(3);
+
+y_pos = zeros(size(x_pos));
+h = plot3(x_pos(1)/1000, y_pos(1)/1000, z_pos(1)/1000, 'b', 'LineWidth', 1.5);
+plot3(x_pos(1)/1000, 0, z_pos(1)/1000, 'go', 'MarkerSize', 8);
+plot3(x_pos(end)/1000, 0, z_pos(end)/1000, 'ro', 'MarkerSize', 8);
+
+missile_surf = surf(nan(size(cone_x)), nan(size(cone_y)), nan(size(cone_z)), 'FaceColor', 'r', 'EdgeColor', 'none');
+
+for k = 2:length(x_pos)
+    center = [x_pos(k), y_pos(k), z_pos(k)] / 1000;
+    pitch = theta(k);
+    Rmat = [cos(pitch) 0 sin(pitch); 0 1 0; -sin(pitch) 0 cos(pitch)];
+    rotated = Rmat * [cone_x(:)'; cone_y(:)'; cone_z(:)'];
+    Xr = reshape(rotated(1,:) + center(1), size(cone_x));
+    Yr = reshape(rotated(2,:) + center(2), size(cone_y));
+    Zr = reshape(rotated(3,:) + center(3), size(cone_z));
+    set(missile_surf, 'XData', Xr, 'YData', Yr, 'ZData', Zr);
+    set(h, 'XData', x_pos(1:k)/1000, 'YData', y_pos(1:k)/1000, 'ZData', z_pos(1:k)/1000);
+    drawnow;
+    pause(0.01);
+end
+
+%% Performance Analysis
+Az_ref_interp = -10 * atan2(Z_target - z_pos, X_target - x_pos);
+Az_ref_interp(t(1:n) < 2) = Az_ref_interp(t(1:n) < 2) + 11.3;
+Az_error = Az_ref_interp - Azm(1:n);
+q_error = x_sim(2,:) - 0;
+
+[~, reach_idx] = min(abs(z_pos - Z_target));
+fprintf('\n--- SFI Controller Performance Summary ---\n');
+fprintf('Time to Reach Target Altitude: %.2f seconds\n', time(reach_idx));
+fprintf('Final Tracking Errors:\n');
+fprintf('  Az Error: %.2f\n', Az_error(end));
+fprintf('   q Error: %.2f\n', q_error(end));
+fprintf('Total Control Effort: %.2f\n', sum(abs(u_sim)));
+fprintf('Average Control Input Magnitude: %.2f\n', mean(abs(u_sim)));
+fprintf('Maximum Control Input: %.2f\n', max(abs(u_sim)));
+
+figure; histogram(u_sim, 20);
+title('Control Input Distribution (SFI)');
+xlabel('Fin Deflection'); ylabel('Frequency'); grid on;
+
+figure;
+subplot(2,1,1);
+plot(time, Az_error, 'r', 'LineWidth', 1.5);
+title('Az Tracking Error - SFI'); ylabel('Error (g)'); grid on;
+
+subplot(2,1,2);
+plot(time, q_error, 'b', 'LineWidth', 1.5);
+title('Pitch Rate Tracking Error - SFI'); xlabel('Time (s)'); ylabel('Error (rad/s)'); grid on;
